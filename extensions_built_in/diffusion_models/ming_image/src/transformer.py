@@ -458,6 +458,27 @@ class MingImageTransformer2DModel(
             mask[i, :n] = True
         return mask
 
+    @staticmethod
+    def _internal_pad_mask(
+        cross_item_mask: Optional[torch.Tensor],
+        valid_lens: List[int],
+        full_lens: List[int],
+        device,
+    ) -> Optional[torch.Tensor]:
+        """Key mask that also hides trailing padding *inside* each item (the
+        zero-padded direct-condition tail). `cross_item_mask` is the batch-level
+        right-padding mask from `_batch` (may be None); the result masks a slot
+        only if both agree it is padding. Returns None when nothing is padded."""
+        width = max(full_lens)
+        if all(v >= width for v in valid_lens):
+            return cross_item_mask
+        mask = torch.zeros((len(full_lens), width), dtype=torch.bool, device=device)
+        for i, n in enumerate(valid_lens):
+            mask[i, :n] = True
+        if cross_item_mask is not None:
+            mask = mask & cross_item_mask
+        return mask
+
     def _batch(self, feats: List[torch.Tensor], pos_ids: List[torch.Tensor], device):
         """Right-pad per-item sequences into a batch; returns the batch, its
         rope, a key mask (None when lengths agree) and the item lengths."""
@@ -491,6 +512,7 @@ class MingImageTransformer2DModel(
         cap_feats: List[torch.Tensor],  # per item (L1, cap_feat_dim) query-token conditions
         cap_feats_2: Optional[List[torch.Tensor]] = None,  # per item (L2, dim) direct-VLM conditions
         ref_x: Optional[List[Optional[torch.Tensor]]] = None,  # per item (C, 1, H, W) reference latent
+        direct_lens: Optional[List[int]] = None,  # per item valid length of cap_feats_2 when zero-padded
         patch_size: int = 2,
         f_patch_size: int = 1,
         return_dict: bool = True,
@@ -510,16 +532,32 @@ class MingImageTransformer2DModel(
         # The 32-alignment pad is materialized only under learned padding; the
         # zero_masked reference masks those slots out of everything, so here
         # they exist only as a gap in the position grid.
+        # cap_feats_2 may arrive zero-padded to a shared length (run_transformer
+        # does this so the DiT sequence length stops depending on the caption):
+        # valid slots stay valid, padded slots are masked out of every attention
+        # below, which leaves every output value unchanged.
         cap_in, cap_direct, cap_pad_lens, cap_pos_ids = [], [], [], []
+        cap_mask_lens = []  # per item: slots that attention may see (valid + learned alignment pad)
         img_feats, img_sizes, img_pos_ids, img_pad_lens = [], [], [], []
-        for image, cap, direct, ref in zip(x, cap_feats, cap_feats_2, ref_x):
-            cap_len = len(cap) + (len(direct) if direct is not None else 0)
+        for item_idx, (image, cap, direct, ref) in enumerate(zip(x, cap_feats, cap_feats_2, ref_x)):
+            n_direct = len(direct) if direct is not None else 0
+            if direct_lens is not None and direct is not None:
+                n_direct_valid = int(direct_lens[item_idx])
+            else:
+                n_direct_valid = n_direct
+            cap_len = len(cap) + n_direct_valid  # valid caption slots
+            cap_full_len = len(cap) + n_direct  # incl. zero-padded direct slots
             cap_pad = (-cap_len) % SEQ_MULTI_OF
             n_pad = cap_pad if learned_pad else 0
             cap_in.append(cap)
             cap_direct.append(direct)
             cap_pad_lens.append(n_pad)
-            cap_pos_ids.append(self._positions(cap_len, 0, (cap_len + n_pad, 1, 1), (1, 0, 0), device))
+            cap_mask_lens.append(cap_len + n_pad)
+            # positions span the padded length too; the padded tail is masked
+            # out below, so its positions are never used
+            cap_pos_ids.append(
+                self._positions(cap_full_len, 0, (cap_full_len + n_pad, 1, 1), (1, 0, 0), device)
+            )
 
             if ref is not None:
                 image = torch.cat([image, ref.to(image.dtype)], dim=1)
@@ -562,6 +600,8 @@ class MingImageTransformer2DModel(
         cap_seqlens = [len(c) for c in cap_items]
         cap_cat = self._apply_pad_token(torch.cat(cap_items, dim=0), cap_pad_lens, cap_seqlens, self.cap_pad_token)
         cap_batch, cap_freqs, cap_mask, _ = self._batch(list(cap_cat.split(cap_seqlens, dim=0)), cap_pos_ids, device)
+        if direct_lens is not None:
+            cap_mask = self._internal_pad_mask(cap_mask, cap_mask_lens, cap_seqlens, device)
         for layer in self.context_refiner:
             if torch.is_grad_enabled() and self.gradient_checkpointing:
                 cap_batch = self._gradient_checkpointing_func(layer, cap_batch, cap_mask, cap_freqs)
@@ -574,7 +614,17 @@ class MingImageTransformer2DModel(
             x_len, cap_len = x_seqlens[i], cap_seqlens[i]
             unified.append(torch.cat([x_emb[i][:x_len], cap_batch[i][:cap_len]]))
             unified_freqs.append(torch.cat([x_freqs[i][:x_len], cap_freqs[i][:cap_len]]))
-        unified_mask = self._length_mask([len(u) for u in unified], device)
+        unified_full_lens = [len(u) for u in unified]
+        unified_mask = self._length_mask(unified_full_lens, device)
+        if direct_lens is not None:
+            # valid prefix = image tokens + visible caption slots; hides the
+            # zero-padded direct tail from every attention in the main stack
+            unified_mask = self._internal_pad_mask(
+                unified_mask,
+                [x_seqlens[i] + cap_mask_lens[i] for i in range(bsz)],
+                unified_full_lens,
+                device,
+            )
         unified = pad_sequence(unified, batch_first=True, padding_value=0.0)
         unified_freqs = pad_sequence(unified_freqs, batch_first=True, padding_value=0.0)
 
