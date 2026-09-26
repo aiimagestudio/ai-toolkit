@@ -1,8 +1,25 @@
 # Ostris AI Toolkit
 
 > [!IMPORTANT]
-> **This fork contains a VRAM fix for Ming-Image LoRA training (not yet upstream).**
-> 本 fork 包含一项 Ming-Image 训练显存修复（上游暂未包含，已提 PR 待合并）。
+> **This fork contains a VRAM fix for Ming-Image LoRA training (not yet upstream; PR pending).**
+>
+> **Problem**: the direct-VLM condition stream of Ming-Image-0.1-Design is trimmed to each
+> caption's true token length and never padded, so the DiT sequence shape varies with every
+> caption. The CUDA caching allocator keeps a block per activation shape it has ever seen —
+> measured on a 16GB card, reserved memory climbed from 4.2GB to 11.8GB within 24 steps with
+> no plateau, eventually filling the entire card (OOM + WDDM paging; step time degraded from
+> 3.2s/it to 72s/it).
+>
+> **Fix** (commit `63ae37b`): `run_transformer` zero-pads the direct stream to a fixed length
+> (256; longer captions fall back to the next multiple of 32), and the transformer takes a new
+> `direct_lens` argument with `_internal_pad_mask` to hide the padded slots from all attention
+> — **outputs are numerically unchanged**. Measured: training memory stays flat at
+> 5.0-5.4GB, sampling works, step time unchanged. Equivalence regression test:
+> `testing/test_ming_pad_equiv.py`.
+>
+> ---
+>
+> **本 fork 包含一项 Ming-Image 训练显存修复（上游暂未包含，已提 PR 待合并）。**
 >
 > **问题**：Ming-Image-0.1 Design 的 direct-VLM 条件流按 caption 真实长度裁剪、不做定长
 > padding，导致 DiT 序列形状随 caption 变化，CUDA caching allocator 为每种形状保留显存且
