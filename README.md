@@ -1,5 +1,20 @@
 # Ostris AI Toolkit
 
+> [!IMPORTANT]
+> **This fork contains a VRAM fix for Ming-Image LoRA training (not yet upstream).**
+> 本 fork 包含一项 Ming-Image 训练显存修复（上游暂未包含，已提 PR 待合并）。
+>
+> **问题**：Ming-Image-0.1 Design 的 direct-VLM 条件流按 caption 真实长度裁剪、不做定长
+> padding，导致 DiT 序列形状随 caption 变化，CUDA caching allocator 为每种形状保留显存且
+> 碎片化不回收——实测 16GB 卡上 reserved 显存 24 步内从 4.2GB 涨到 11.8GB 且不封顶，
+> 最终占满整卡（OOM + WDDM 换页，步速 3.2s/it 恶化到 72s/it）。
+>
+> **修复**（commit `63ae37b`）：`run_transformer` 将 direct 流零填充到定长 256（超长回退
+> 32 的倍数），transformer 新增 `direct_lens` 参数与 `_internal_pad_mask`，把 pad 槽位
+> 掩出全部注意力——**输出数值不变**。实测：训练显存平坦在 5.0~5.4GB，采样正常，步速无回退。
+>
+> 数值等价回归测试：`testing/test_ming_pad_equiv.py`。
+
 AI Toolkit is an easy to use all in one training suite for diffusion models. I try to support all the latest models on consumer grade hardware. Image and video models. It can be run as a GUI or CLI. It is designed to be easy to use but still have every feature imaginable. Free and open source.
 
 
