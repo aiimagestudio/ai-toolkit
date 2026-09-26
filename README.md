@@ -1,7 +1,7 @@
 # Ostris AI Toolkit
 
 > [!IMPORTANT]
-> **This fork contains a VRAM fix for Ming-Image LoRA training (not yet upstream; PR pending).**
+> **This fork contains a VRAM fix for Ming-Image LoRA training (not yet included upstream).**
 >
 > **Problem**: the direct-VLM condition stream of Ming-Image-0.1-Design is trimmed to each
 > caption's true token length and never padded, so the DiT sequence shape varies with every
@@ -19,7 +19,7 @@
 >
 > ---
 >
-> **本 fork 包含一项 Ming-Image 训练显存修复（上游暂未包含，已提 PR 待合并）。**
+> **本 fork 包含一项 Ming-Image 训练显存修复（上游暂未包含）。**
 >
 > **问题**：Ming-Image-0.1 Design 的 direct-VLM 条件流按 caption 真实长度裁剪、不做定长
 > padding，导致 DiT 序列形状随 caption 变化，CUDA caching allocator 为每种形状保留显存且
